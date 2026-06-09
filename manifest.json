@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Retro Web — The Information Superhighway",
+  "version": "0.1.0",
+  "description": "Uses Claude to rebuild any page as a glorious 90s/early-2000s website. Best viewed in Netscape Navigator.",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": ["https://api.anthropic.com/*", "<all_urls>"],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "action": {
+    "default_popup": "src/popup.html",
+    "default_title": "Retro-fy this page"
+  },
+  "options_page": "src/options.html"
+}

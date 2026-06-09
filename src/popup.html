@@ -1,0 +1,56 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        width: 260px;
+        margin: 0;
+        padding: 12px;
+        background: #c0c0c0;
+        font: 12px "MS Sans Serif", Arial, sans-serif;
+      }
+      h1 {
+        font-size: 13px;
+        margin: 0 0 10px;
+        text-align: center;
+      }
+      button {
+        display: block;
+        width: 100%;
+        padding: 8px;
+        font: bold 13px "MS Sans Serif", Arial, sans-serif;
+        background: #c0c0c0;
+        border-top: 2px solid #fff;
+        border-left: 2px solid #fff;
+        border-right: 2px solid #404040;
+        border-bottom: 2px solid #404040;
+        cursor: pointer;
+      }
+      button:active {
+        border-top: 2px solid #404040;
+        border-left: 2px solid #404040;
+        border-right: 2px solid #fff;
+        border-bottom: 2px solid #fff;
+      }
+      #status {
+        margin-top: 8px;
+        min-height: 14px;
+        color: #800000;
+      }
+      a {
+        display: block;
+        margin-top: 10px;
+        text-align: center;
+        color: #000080;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>🌐 Retro Web 🌐</h1>
+    <button id="retrofy">Retro-fy this page!!</button>
+    <div id="status"></div>
+    <a href="#" id="options">⚙ Options (API key &amp; model)</a>
+    <script src="popup.js"></script>
+  </body>
+</html>
