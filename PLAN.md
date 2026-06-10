@@ -76,6 +76,56 @@ One change fixes five findings at once:
 10. **Batch deltas** in the background (flush per network read or ~100ms)
     to cut port messages 10-50x.
 
+## Phase S — Speed (generation latency)
+
+Latency budget for a retro-mode link click: navigation→DCL (1–5s, now
+overlapped by the commit-time cover), time-to-first-token (2–5s), style
+block streaming with nothing revealable (5–15s), body streaming (20–80s,
+dominant). Levers, in expected-impact order:
+
+S1. **Speculative generation at click time** (biggest perceived win,
+    medium effort). We know the destination URL the moment a retro link is
+    clicked — don't wait for the page to load to start generating. At click:
+    background `fetch()`es the destination HTML, parses it in an
+    **offscreen document** (`chrome.offscreen` — service workers have no
+    DOMParser), runs the same extraction, and starts the API stream
+    immediately, buffering deltas. When the content script connects after
+    DOMContentLoaded, it drains the buffer and tails the live stream.
+    Overlaps generation with navigation + page load: saves ~5–15s per hop.
+    Fallback: if the fetch fails or returns bot-walled content (no
+    headings/paragraphs extracted), fall back to today's extract-after-load
+    flow. Mind cookies/auth: prefetch only for http(s) GET navigations.
+
+S2. **Reveal sooner: two-stage CSS prompt rule** (small effort, big felt
+    win). The page stays on the modem screen until the opening style block
+    closes. Change the prompt: "opening <style> must be under 25 lines —
+    just colors, fonts, table borders; you may emit a second <style> with
+    refinements at the END of the page." Cuts time-to-first-visible-content
+    from ~10–15s to ~3–5s.
+
+S3. **Shorter pages by default** (zero effort, linear win). Output tokens
+    dominate. Tighten "~200 lines" to "~120 lines, never more than 160" and
+    drop max_tokens 8192 → 6144. A 35% shorter page is ~35% faster. Keep
+    quality by telling the model to cut item COUNT (fewer curated links/
+    sections), not the jokes.
+
+S4. **"Surfing speed" model preset** (small effort, user choice). Retro
+    mode hops are where speed matters most: optional setting to use Haiku
+    4.5 for link-follow generations (~3–4× faster) while keeping the chosen
+    model for explicitly retro-fied pages. Caches stay per-model.
+
+S5. **Trim the input** (small effort, small win). 9KB content cap → 6KB,
+    drop the LINK list to 15 for retro-mode hops. Faster time-to-first-token
+    and cheaper.
+
+S6. **Real transfer stats on the modem screen** (instrumentation, fun).
+    Show actual tok/s and elapsed time in the status bar ("CONNECT 28800"
+    becomes honest). Needed to measure S1–S5 instead of guessing.
+
+Not planned: pre-generating pages for links the user *might* click — each
+speculative page costs real API money; only generate what was actually
+requested (S1 still only generates the clicked destination).
+
 ## Phase 3 — Cleanup & polish
 
 11. Shared `win95.css` used by popup + options + (via insertCSS) the overlay
