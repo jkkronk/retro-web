@@ -71,6 +71,10 @@ Pages are cached per URL per model, so revisits are free.
   a link inside a retro page, the extension re-injects itself into the
   destination page. Chrome's `activeTab` grant dies on navigation, so
   standing host access is required for this feature.
+- **Why `webNavigation` permission:** used only to time injection in
+  retro-mode tabs (paint the loading screen at navigation commit, start
+  generation at DOMContentLoaded). Navigation events for tabs not in retro
+  mode are ignored; nothing is collected, stored, or transmitted.
 - **Generated HTML can't run code:** the retro page renders inside an iframe
   sandboxed without `allow-scripts`, so model output cannot execute
   JavaScript regardless of what it contains, plus a sanitization pass as

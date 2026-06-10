@@ -59,23 +59,83 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   }
 });
 
+// Runs in the page at document_start, before first paint: hides the modern
+// page behind a terminal-style cover so retro-mode navigation never flashes
+// the 2026 site. The content script removes it once the modem screen is up.
+function paintCover() {
+  if (window.__retroCover || window.__retroWebActive) return;
+  const cover = document.createElement("div");
+  cover.id = "__retro-web-cover";
+  cover.style.cssText = [
+    "position:fixed",
+    "inset:0",
+    "z-index:2147483646",
+    "background:#000",
+    "color:#33ff33",
+    "font:14px/1.7 'Courier New',monospace",
+    "padding:40px",
+  ].join(";");
+  cover.textContent =
+    "RETRO-WEB v0.1\n\nATDT 555-0199 ...\n*** dialing ***\nrequesting page from the information superhighway ...";
+  cover.style.whiteSpace = "pre-wrap";
+  (document.documentElement || document).appendChild(cover);
+  window.__retroCover = cover;
+}
+
+// Commit time is the earliest moment the new document exists — painting the
+// cover here (injectImmediately) beats first paint, so the modern page is
+// never visible between clicking a retro link and the modem screen.
+chrome.webNavigation.onCommitted.addListener(async ({ tabId, frameId }) => {
+  if (frameId !== 0) return;
+  if (!(await isRetroMode(tabId))) return;
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      injectImmediately: true,
+      func: paintCover,
+    });
+  } catch (_) {
+    // Restricted page; the load-complete handler drops retro mode.
+  }
+});
+
+// Ensure-on, never toggle: re-running content.js on a page where the overlay
+// is already showing would toggle it OFF, so check before injecting. Both
+// load-progress listeners below funnel through this, which makes them safe
+// to fire in any order or repeatedly.
+async function ensureRetroInjected(tabId) {
+  const [check] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => Boolean(window.__retroWebActive),
+  });
+  if (!check?.result) {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["src/content.js"],
+    });
+  }
+}
+
+// Kick off extraction + generation at DOMContentLoaded — the text content is
+// extractable then, and waiting for "complete" (all images/ads) costs seconds
+// on heavy pages.
+chrome.webNavigation.onDOMContentLoaded.addListener(async ({ tabId, frameId }) => {
+  if (frameId !== 0) return;
+  if (!(await isRetroMode(tabId))) return;
+  try {
+    await ensureRetroInjected(tabId);
+  } catch (_) {
+    // Handled (with retro-mode drop-out) by the complete listener below.
+  }
+});
+
+// Fallback for loads where DOMContentLoaded was missed (e.g. injected mid-
+// load) and the place restricted pages drop out of retro mode.
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
   if (changeInfo.status !== "complete") return;
   if (!(await isRetroMode(tabId))) return;
   try {
-    // Ensure-on, never toggle: re-running content.js on a page where the
-    // overlay is already showing would toggle it OFF (duplicate "complete"
-    // events fire for one load), so check before injecting.
-    const [check] = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: () => Boolean(window.__retroWebActive),
-    });
-    if (!check?.result) {
-      await chrome.scripting.executeScript({
-        target: { tabId },
-        files: ["src/content.js"],
-      });
-    }
+    await ensureRetroInjected(tabId);
   } catch (_) {
     // Restricted page (chrome://, web store, etc.) — drop out of retro mode
     // so we don't keep failing on every load in this tab.

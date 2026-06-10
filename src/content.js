@@ -43,6 +43,8 @@
     }
     state.overlay?.remove();
     state.overlay = null;
+    window.__retroCover?.remove();
+    delete window.__retroCover;
     // Any dismissal exits retro mode — not just the eject button — so the
     // tab doesn't keep auto-retro-fying after the user opted out.
     try {
@@ -246,6 +248,11 @@
     document.documentElement.appendChild(overlay);
 
     const modem = startModemScreen(overlay);
+
+    // The navigation cover (painted at commit time in retro mode) has done
+    // its job once the modem screen is up.
+    window.__retroCover?.remove();
+    delete window.__retroCover;
 
     const doc = iframe.contentDocument;
     doc.open();
