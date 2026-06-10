@@ -8,8 +8,10 @@ page "downloads at 28.8 kbps".
 Click a link inside a retro page and the next page gets retro-fied too.
 Surf the whole web in 1998.
 
-> 📸 *Screenshot/demo GIF coming soon — retro-fy your favorite news site and
-> see for yourself.*
+![google.com, retro-fied: WebMaster Dave's Google Mirror — 100% certified Y2K compliant](docs/screenshot.png)
+
+*google.com after Retro Web. Hand-crafted HTML. No tables were harmed in the
+making of this page.*
 
 ## How it works
 
