@@ -8,10 +8,11 @@ page "downloads at 28.8 kbps".
 Click a link inside a retro page and the next page gets retro-fied too.
 Surf the whole web in 1998.
 
-![google.com, retro-fied: WebMaster Dave's Google Mirror — 100% certified Y2K compliant](docs/screenshot.png)
+![google.com, retro-fied: WebMaster Dave's Google tribute page — hit counter at 1,337,042 visitors since 1998, an "under construction" banner, and a webring](docs/screenshot.png)
 
-*google.com after Retro Web. Hand-crafted HTML. No tables were harmed in the
-making of this page.*
+*google.com after Retro Web — hit counter, webring, "under construction" and
+all. Click **⏏ Back to 2026** (top right) to return. No tables were harmed in
+the making of this page.*
 
 ## How it works
 
