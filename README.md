@@ -80,16 +80,6 @@ Pages are cached per URL per model, so revisits are free.
   JavaScript regardless of what it contains, plus a sanitization pass as
   defense-in-depth.
 
-## Known limitations
-
-- SPAs that navigate via `history.pushState` don't trigger retro-mode
-  re-injection yet.
-- Restricted pages (`chrome://`, Chrome Web Store) can't be retro-fied.
-- Generation takes ~10–60s depending on model — that's what the modem
-  screen is for. It was never fast in 1998 either.
-
-See [PLAN.md](PLAN.md) for the roadmap.
-
 ## Project layout
 
 ```
@@ -100,11 +90,6 @@ src/popup.html/js      Toolbar popup ("Retro-fy this page!!")
 src/options.html/js    API key + model picker
 scripts/smoke-test.js  Runtime smoke test (stubbed DOM/chrome APIs)
 ```
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Short version: no build step, vanilla
-JS on purpose; run `node scripts/smoke-test.js` before sending a PR.
 
 ## License
 
