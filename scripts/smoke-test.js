@@ -41,7 +41,12 @@ const el = () =>
 
 global.window = global;
 global.location = { href: "https://example.com/" };
-global.NodeFilter = { SHOW_ELEMENT: 1 };
+global.NodeFilter = {
+  SHOW_ELEMENT: 1,
+  FILTER_ACCEPT: 1,
+  FILTER_REJECT: 2,
+  FILTER_SKIP: 3,
+};
 global.DOMParser = class {
   parseFromString() {
     return { head: el(), body: el(), querySelectorAll: () => [] };

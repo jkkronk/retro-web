@@ -31,18 +31,38 @@
     };
 
     parts.push(`TITLE: ${doc.title}`);
-    const desc = doc.querySelector('meta[name="description"]')?.content;
+    // Prefer the real <meta name="description">; fall back to the social-card
+    // og:description so pages that only ship OpenGraph metadata still get a blurb.
+    const desc =
+      doc.querySelector('meta[name="description"]')?.content ||
+      doc.querySelector('meta[property="og:description"]')?.content;
     if (desc) parts.push(`DESCRIPTION: ${desc}`);
     totalLen = parts.join("\n").length;
 
+    // The social-card hero is usually the single best image on the page —
+    // seed it before the walk so the per-category image cap can't crowd it out.
+    const ogImage = doc.querySelector('meta[property="og:image"]')?.content;
+    if (ogImage && ogImage.startsWith("http")) {
+      push("image", `IMAGE: ${ogImage} (alt: none)`);
+    }
+
     const root =
       doc.querySelector("main, article, [role='main']") || doc.body;
-    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    // FILTER_REJECT skips the whole subtree, so nav/header/footer/aside links
+    // never spend the link budget on "Privacy Policy" and friends. (SCRIPT/
+    // STYLE/NOSCRIPT rejection replaces the old inline `continue`.)
+    const SKIP =
+      /^(SCRIPT|STYLE|NOSCRIPT|NAV|HEADER|FOOTER|ASIDE)$/;
+    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
+      acceptNode: (node) =>
+        SKIP.test(node.tagName)
+          ? NodeFilter.FILTER_REJECT
+          : NodeFilter.FILTER_ACCEPT,
+    });
 
     for (let node = walker.currentNode; node; node = walker.nextNode()) {
       if (totalLen > MAX_CHARS) break;
       const tag = node.tagName;
-      if (tag === "SCRIPT" || tag === "STYLE" || tag === "NOSCRIPT") continue;
       if (/^H[1-4]$/.test(tag)) {
         const text = clean(node.textContent);
         if (text && text.length < 200) push("heading", `${tag}: ${text}`);
@@ -51,11 +71,17 @@
         if (text && text.length > 20) push("text", text.slice(0, 500));
       } else if (tag === "IMG") {
         const src = node.currentSrc || node.src;
-        // Only exclude images KNOWN to be small — lazy-loaded and parsed-but-
-        // not-rendered images report 0×0 and would otherwise all be dropped.
-        const w = node.width || 0;
-        const h = node.height || 0;
-        const knownSmall = w > 0 && h > 0 && (w <= 80 || h <= 80);
+        // Keep every http(s) image unless a source POSITIVELY says it's a small
+        // icon. Use the HTML width/height attributes (the only dims available in
+        // the offscreen DOMParser) and naturalWidth when loaded — never layout
+        // width/height, which read 0 for lazy/offscreen images and dropped them.
+        const aw = parseInt(node.getAttribute("width"), 10);
+        const ah = parseInt(node.getAttribute("height"), 10);
+        const nw = node.naturalWidth || 0;
+        const nh = node.naturalHeight || 0;
+        const knownSmall =
+          (aw > 0 && ah > 0 && (aw <= 64 || ah <= 64)) ||
+          (nw > 0 && nh > 0 && (nw <= 64 || nh <= 64));
         if (src && src.startsWith("http") && !knownSmall) {
           push("image", `IMAGE: ${src} (alt: ${node.alt || "none"})`);
         }

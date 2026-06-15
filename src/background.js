@@ -203,6 +203,7 @@ async function retrofy(msg, port, controller) {
   const cacheKey = `cache::${model}::${msg.url}`;
   const cached = (await chrome.storage.local.get(cacheKey))[cacheKey];
   if (cached) {
+    touchCache(cacheKey); // read counts as use — true LRU
     port.postMessage({ type: "delta", text: cached });
     port.postMessage({ type: "done", complete: true, fromCache: true });
     return;
@@ -263,6 +264,21 @@ async function runGeneration({ apiKey, model, url, content, signal, cacheKey, on
   // periodic API calls count as activity and keep this worker alive while
   // the stream is open.
   const keepalive = setInterval(() => chrome.runtime.getPlatformInfo(), 20000);
+  // Coalesce per-token deltas into ~100ms batches (or 4KB, whichever comes
+  // first) before forwarding — cuts port messages ~10-50x. The size threshold
+  // keeps first paint snappy; the timer keeps the stream feeling live.
+  let pending = "";
+  const flush = () => {
+    if (!pending) return;
+    const text = pending;
+    pending = "";
+    // Delivery is best-effort: on abort the port may already be gone, and a
+    // post failure must not mask the real stream error from the finally block.
+    try {
+      onDelta(text);
+    } catch (_) {}
+  };
+  const batcher = setInterval(flush, 100);
   let fullText = "";
   let stopReason = null;
   let complete = false;
@@ -270,7 +286,8 @@ async function runGeneration({ apiKey, model, url, content, signal, cacheKey, on
     for await (const event of sseEvents(response.body)) {
       if (event.type === "content_block_delta" && event.delta?.type === "text_delta") {
         fullText += event.delta.text;
-        onDelta(event.delta.text);
+        pending += event.delta.text;
+        if (pending.length >= 4096) flush();
       } else if (event.type === "message_delta" && event.delta?.stop_reason) {
         stopReason = event.delta.stop_reason;
       } else if (event.type === "message_stop") {
@@ -280,20 +297,65 @@ async function runGeneration({ apiKey, model, url, content, signal, cacheKey, on
       }
     }
   } finally {
+    clearInterval(batcher);
     clearInterval(keepalive);
+    flush(); // never drop the tail
   }
 
   // Only a cleanly finished generation may become the canonical cached page —
   // a max_tokens truncation or dropped connection must not replay forever.
   if (complete && stopReason === "end_turn") {
-    try {
-      await chrome.storage.local.set({ [cacheKey]: fullText });
-    } catch (_) {
-      // Cache full or unavailable; the page still rendered — never surface
-      // a cache-write failure as a generation error.
-    }
+    await recordCache(cacheKey, fullText);
   }
   return { complete };
+}
+
+// ------------------------------------------------------------------ cache LRU
+// Entries live at `cache::${model}::${url}` (raw HTML string). Recency is kept
+// in one side index `cache::__index` => { [cacheKey]: lastAccessMs } so the
+// store stays bounded. All cache ops are best-effort: the page already
+// rendered, so a storage failure must NEVER surface as a generation error.
+//
+// Caveat: the index read-modify-write isn't atomic across concurrent
+// generations (rare here — at most a few tabs), and pre-upgrade entries are
+// adopted into the index lazily on their next hit/rewrite, so eviction only
+// governs indexed entries.
+
+const CACHE_INDEX_KEY = "cache::__index";
+const MAX_CACHE = 50;
+
+async function loadIndex() {
+  return (await chrome.storage.local.get(CACHE_INDEX_KEY))[CACHE_INDEX_KEY] || {};
+}
+
+async function recordCache(cacheKey, html) {
+  try {
+    await chrome.storage.local.set({ [cacheKey]: html });
+    const index = await loadIndex();
+    index[cacheKey] = Date.now();
+    const keys = Object.keys(index);
+    if (keys.length > MAX_CACHE) {
+      // Evict the oldest (least-recently-used) keys down to the cap.
+      const stale = keys
+        .sort((a, b) => index[a] - index[b])
+        .slice(0, keys.length - MAX_CACHE);
+      for (const k of stale) delete index[k];
+      await chrome.storage.local.remove(stale);
+    }
+    await chrome.storage.local.set({ [CACHE_INDEX_KEY]: index });
+  } catch (_) {
+    // Cache full or unavailable; the page still rendered.
+  }
+}
+
+async function touchCache(cacheKey) {
+  try {
+    const index = await loadIndex();
+    index[cacheKey] = Date.now();
+    await chrome.storage.local.set({ [CACHE_INDEX_KEY]: index });
+  } catch (_) {
+    // Best-effort recency bump; ignore.
+  }
 }
 
 // ------------------------------------------------- speculative generation
@@ -315,7 +377,10 @@ async function startSpeculative(tabId, url) {
     const { apiKey, model } = await getSettings();
     if (!apiKey) return;
     const cacheKey = `cache::${model}::${url}`;
-    if ((await chrome.storage.local.get(cacheKey))[cacheKey]) return; // cache serves instantly
+    if ((await chrome.storage.local.get(cacheKey))[cacheKey]) {
+      touchCache(cacheKey); // cache serves instantly — still counts as a use
+      return;
+    }
 
     abortPending(tabId); // at most one speculative run per tab
     const controller = new AbortController();

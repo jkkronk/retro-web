@@ -3,8 +3,9 @@
 Based on the 7-angle code review (2026-06-09). Ordered by phase; items within a
 phase are independent unless noted.
 
-> **Status:** Phase 0 (items 1–6) and Phase 1 (item 7) are implemented.
-> Phases 2–3 are open.
+> **Status:** Phase 0 (items 1–6), Phase 1 (item 7), and Phase 2 (items 8–10)
+> are implemented. Phase S (speed) is partially in (S1 speculative generation,
+> plus S2/S3/S5 prompt + cap tightening). Phase 3 is open.
 
 ## The key architectural move (Phase 1 centerpiece)
 

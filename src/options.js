@@ -17,9 +17,17 @@ document.getElementById("save").addEventListener("click", async () => {
 });
 
 document.getElementById("clearCache").addEventListener("click", async () => {
-  const all = await chrome.storage.local.get(null);
-  const cacheKeys = Object.keys(all).filter((k) => k.startsWith("cache::"));
-  await chrome.storage.local.remove(cacheKeys);
+  // getKeys() (Chrome 130+) lists keys without loading every cached page's
+  // full HTML; fall back to get(null) on older Chrome.
+  const keys = chrome.storage.local.getKeys
+    ? await chrome.storage.local.getKeys()
+    : Object.keys(await chrome.storage.local.get(null));
+  // The LRU index (cache::__index) is bookkeeping, not a page — clear it too
+  // but don't count it.
+  const cacheKeys = keys.filter(
+    (k) => k.startsWith("cache::") && k !== "cache::__index",
+  );
+  await chrome.storage.local.remove([...cacheKeys, "cache::__index"]);
   saved.textContent = `Cleared ${cacheKeys.length} cached page(s).`;
   setTimeout(() => (saved.textContent = ""), 3000);
 });
