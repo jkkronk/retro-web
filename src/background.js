@@ -8,8 +8,10 @@
 // and MV3 forbids loading remote code, so a bundler-free fetch client is the
 // pragmatic choice for a service worker.
 
+importScripts("constants.js");
+const { DEFAULT_MODEL, CACHE_INDEX_KEY, buildCacheKey } = self.RetroConst;
+
 const API_URL = "https://api.anthropic.com/v1/messages";
-const DEFAULT_MODEL = "claude-opus-4-8";
 // Output length is the dominant latency cost — a tight cap plus the
 // "curate, don't transcribe" prompt rule keeps generation fast.
 const MAX_TOKENS = 6144;
@@ -200,7 +202,7 @@ async function retrofy(msg, port, controller) {
     return;
   }
 
-  const cacheKey = `cache::${model}::${msg.url}`;
+  const cacheKey = buildCacheKey(model, msg.url);
   const cached = (await chrome.storage.local.get(cacheKey))[cacheKey];
   if (cached) {
     touchCache(cacheKey); // read counts as use — true LRU
@@ -321,7 +323,6 @@ async function runGeneration({ apiKey, model, url, content, signal, cacheKey, on
 // adopted into the index lazily on their next hit/rewrite, so eviction only
 // governs indexed entries.
 
-const CACHE_INDEX_KEY = "cache::__index";
 const MAX_CACHE = 50;
 
 async function loadIndex() {
@@ -376,7 +377,7 @@ async function startSpeculative(tabId, url) {
   try {
     const { apiKey, model } = await getSettings();
     if (!apiKey) return;
-    const cacheKey = `cache::${model}::${url}`;
+    const cacheKey = buildCacheKey(model, url);
     if ((await chrome.storage.local.get(cacheKey))[cacheKey]) {
       touchCache(cacheKey); // cache serves instantly — still counts as a use
       return;

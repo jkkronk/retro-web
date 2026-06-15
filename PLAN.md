@@ -3,9 +3,12 @@
 Based on the 7-angle code review (2026-06-09). Ordered by phase; items within a
 phase are independent unless noted.
 
-> **Status:** Phase 0 (items 1–6), Phase 1 (item 7), and Phase 2 (items 8–10)
-> are implemented. Phase S (speed) is partially in (S1 speculative generation,
-> plus S2/S3/S5 prompt + cap tightening). Phase 3 is open.
+> **Status:** Phase 0 (items 1–6), Phase 1 (item 7), Phase 2 (items 8–10), and
+> Phase 3 items 11–14 are implemented (item 12 was already satisfied by the
+> Phase 0/1 work — no `phase`/`bytes` state or arm-then-clear watchdog remained).
+> Phase S (speed) is partially in (S1 speculative generation, plus S2/S3/S5
+> prompt + cap tightening). Phase 3 item 15 (SPA navigation) is left as an
+> opt-in — it adds a permission and follows `history.pushState` navigations.
 
 ## The key architectural move (Phase 1 centerpiece)
 

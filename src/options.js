@@ -4,7 +4,7 @@ const saved = document.getElementById("saved");
 
 chrome.storage.local.get(["apiKey", "model"]).then((stored) => {
   apiKeyInput.value = stored.apiKey || "";
-  modelSelect.value = stored.model || "claude-opus-4-8";
+  modelSelect.value = stored.model || RetroConst.DEFAULT_MODEL;
 });
 
 document.getElementById("save").addEventListener("click", async () => {
@@ -24,10 +24,8 @@ document.getElementById("clearCache").addEventListener("click", async () => {
     : Object.keys(await chrome.storage.local.get(null));
   // The LRU index (cache::__index) is bookkeeping, not a page — clear it too
   // but don't count it.
-  const cacheKeys = keys.filter(
-    (k) => k.startsWith("cache::") && k !== "cache::__index",
-  );
-  await chrome.storage.local.remove([...cacheKeys, "cache::__index"]);
+  const cacheKeys = keys.filter(RetroConst.isCacheKey);
+  await chrome.storage.local.remove([...cacheKeys, RetroConst.CACHE_INDEX_KEY]);
   saved.textContent = `Cleared ${cacheKeys.length} cached page(s).`;
   setTimeout(() => (saved.textContent = ""), 3000);
 });

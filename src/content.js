@@ -23,6 +23,9 @@
       if (state.overlay) teardown();
       else start();
     },
+    // Internal hook for scripts/smoke-test.js — lets it exercise the harden
+    // pass against fixture HTML. Not part of the public surface.
+    _test: { isBlockedUrl, stripImports, hardenDocument },
   };
 
   // The background's ensure-on check (retro-mode navigation) reads this to
@@ -284,6 +287,23 @@
   // Defense-in-depth pass after the stream closes. The sandbox already
   // prevents execution; this strips inert-but-unwanted active content and
   // external CSS imports.
+
+  // A URL attribute value that must be stripped. Entity decoding can hide
+  // "javascript:" behind control chars, so strip those before the scheme check.
+  function isBlockedUrl(value) {
+    const v = value.replace(/[\u0000-\u0020]/g, "").toLowerCase();
+    return (
+      v.startsWith("javascript:") ||
+      v.startsWith("vbscript:") ||
+      v.startsWith("data:text/html")
+    );
+  }
+
+  // Remove @import rules so generated CSS can't pull in external stylesheets.
+  function stripImports(css) {
+    return css.replace(/@import[^;]*;?/gi, "");
+  }
+
   function hardenDocument(doc) {
     doc
       .querySelectorAll("script, object, embed, form, iframe, link, meta[http-equiv]")
@@ -295,22 +315,13 @@
           el.removeAttribute(attr.name);
           continue;
         }
-        if (["href", "src", "formaction", "xlink:href"].includes(name)) {
-          // Entity decoding can hide "javascript:" behind control chars —
-          // strip them before the scheme check.
-          const value = attr.value.replace(/[\u0000-\u0020]/g, "").toLowerCase();
-          if (
-            value.startsWith("javascript:") ||
-            value.startsWith("vbscript:") ||
-            value.startsWith("data:text/html")
-          ) {
-            el.removeAttribute(attr.name);
-          }
+        if (["href", "src", "formaction", "xlink:href"].includes(name) && isBlockedUrl(attr.value)) {
+          el.removeAttribute(attr.name);
         }
       }
     }
     for (const style of doc.querySelectorAll("style")) {
-      style.textContent = style.textContent.replace(/@import[^;]*;?/gi, "");
+      style.textContent = stripImports(style.textContent);
     }
   }
 

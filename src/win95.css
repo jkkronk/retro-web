@@ -1,0 +1,44 @@
+/* Shared Windows-95 chrome for the popup and options pages.
+   The on-page overlay (content.js) intentionally keeps its own inline styles
+   so it survives hostile host-page CSS — it is NOT driven from here. */
+
+button {
+  font: bold 13px "MS Sans Serif", Arial, sans-serif;
+  background: #c0c0c0;
+  border-top: 2px solid #fff;
+  border-left: 2px solid #fff;
+  border-right: 2px solid #404040;
+  border-bottom: 2px solid #404040;
+  cursor: pointer;
+}
+button:active {
+  border-top: 2px solid #404040;
+  border-left: 2px solid #404040;
+  border-right: 2px solid #fff;
+  border-bottom: 2px solid #fff;
+}
+
+/* Raised panel + title bar (the Control Panel "window"). */
+.win95-window {
+  background: #c0c0c0;
+  border-top: 2px solid #fff;
+  border-left: 2px solid #fff;
+  border-right: 2px solid #404040;
+  border-bottom: 2px solid #404040;
+  padding: 2px;
+}
+.win95-titlebar {
+  background: linear-gradient(90deg, #000080, #1084d0);
+  color: #fff;
+  font-weight: bold;
+  padding: 4px 8px;
+}
+
+/* Sunken input/select field. */
+.win95-field {
+  background: #fff;
+  border-top: 2px solid #404040;
+  border-left: 2px solid #404040;
+  border-right: 2px solid #fff;
+  border-bottom: 2px solid #fff;
+}
