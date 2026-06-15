@@ -16,6 +16,8 @@ jobs:
       - name: Syntax-check all JS
         run: |
           for f in src/*.js scripts/*.js; do node --check "$f"; done
+      - name: Check for stray control bytes in source
+        run: node scripts/check-text.js
       - name: Smoke test
         run: node scripts/smoke-test.js
       - name: Validate manifest
