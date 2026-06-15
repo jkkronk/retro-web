@@ -1,5 +1,8 @@
 // Background service worker: receives extracted page content from the content
 // script over a Port, streams a retro-fied page back from the Claude API.
+// For retro-mode link clicks, generation starts SPECULATIVELY at click time
+// (prefetch destination → parse in offscreen doc → stream) so tokens are
+// already flowing while the destination page is still loading.
 //
 // Raw fetch instead of @anthropic-ai/sdk: this extension has no build step,
 // and MV3 forbids loading remote code, so a bundler-free fetch client is the
@@ -9,28 +12,28 @@ const API_URL = "https://api.anthropic.com/v1/messages";
 const DEFAULT_MODEL = "claude-opus-4-8";
 // Output length is the dominant latency cost — a tight cap plus the
 // "curate, don't transcribe" prompt rule keeps generation fast.
-const MAX_TOKENS = 8192;
+const MAX_TOKENS = 6144;
 
 const SYSTEM_PROMPT = `You are "WebMaster Dave", a passionate amateur webmaster in the year 1998 running a hand-crafted homepage on Geocities. You rebuild modern web pages as authentic late-90s/early-2000s websites.
 
 You will receive the extracted content of a modern web page. Rebuild it as a retro page, keeping the real content (titles, text, links, image references) but presenting it with full 90s commitment.
 
 Output rules — follow these exactly:
-- Output ONLY an HTML fragment: one <style> block followed by body markup. No <html>, <head>, <body>, or markdown fences.
-- The page is rendered progressively while you stream, so keep the <style> block COMPACT (well under 60 lines) and close it quickly — get to visible body content fast. Put the most impressive content (banner, marquee, title table) first.
+- Output ONLY an HTML fragment: an opening <style> block followed by body markup. No <html>, <head>, <body>, or markdown fences.
+- The page renders progressively while you stream. Your opening <style> block must be UNDER 25 LINES — just the palette, fonts, link colors, and table borders — then close it and start visible content immediately, leading with the flashiest part (banner, marquee, title table). You may add ONE extra <style> block with refinements at the very END of the page.
 - NO JavaScript. No <script> tags, no event handler attributes. Animation must be CSS-only (plus <marquee> and <blink>-style CSS keyframes).
 - No external resources: no external stylesheets, fonts, or images from the web. For the original page's images, you may reuse their src URLs in <img> tags with width attributes and chunky borders. For decorations, use emoji, ASCII art, and CSS.
 - Use the period-correct toolkit: <table> layouts with visible borders, <marquee>, <center>, <font>-style CSS (Comic Sans MS, Times New Roman, monospace), web-safe colors (teal, fuchsia, lime, navy, yellow), tiled-looking CSS background patterns, beveled outset borders on everything clickable, visited-link purple, horizontal rules.
 - Include period furniture where it fits: a hit counter (make up a number), "Best viewed in Netscape Navigator 4.0 at 800x600" badge, an under-construction section, a guestbook link, a webring footer ("<< prev | random | next >>"), "Sign my guestbook!!", a "last updated" date in the late 90s.
 - Write in WebMaster Dave's voice for the chrome around the content (welcome marquee, footer, asides), but keep the actual page content faithful — same information, retro presentation.
 - Keep it to one cohesive page. Make it genuinely fun, not lazy.
-- SPEED MATTERS: keep the whole page under ~200 lines of markup. CURATE, don't transcribe — for link-heavy or content-heavy pages (news fronts, search results), pick the ~10 best items and present those well rather than including everything.`;
+- SPEED MATTERS: keep the whole page under ~120 lines of markup, never more than 160. CURATE, don't transcribe — pick the ~8 best items and present them well rather than including everything. Cut item count, never the jokes.`;
 
 // ---------------------------------------------------------- retro mode
 // A tab enters "retro mode" when the user clicks a link inside a retro page:
 // we navigate the tab ourselves and re-inject the content script when the
-// destination finishes loading, so the user keeps surfing in 1998.
-// Tracked in storage.session so it survives service worker restarts.
+// destination loads, so the user keeps surfing in 1998. Tracked in
+// storage.session so it survives service worker restarts.
 
 const retroTabKey = (tabId) => `retrotab::${tabId}`;
 
@@ -54,9 +57,17 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     setRetroMode(tabId, true).then(() =>
       chrome.tabs.update(tabId, { url: msg.url }),
     );
+    // We know the destination NOW — start generating while it loads.
+    startSpeculative(tabId, msg.url);
   } else if (msg.type === "retro-exit") {
     setRetroMode(tabId, false);
+    abortPending(tabId);
   }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  setRetroMode(tabId, false);
+  abortPending(tabId);
 });
 
 // Runs in the page at document_start, before first paint: hides the modern
@@ -111,7 +122,7 @@ async function ensureRetroInjected(tabId) {
   if (!check?.result) {
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: ["src/content.js"],
+      files: ["src/extract.js", "src/content.js"],
     });
   }
 }
@@ -143,8 +154,6 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
   }
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => setRetroMode(tabId, false));
-
 // ------------------------------------------------------------- generation
 
 chrome.runtime.onConnect.addListener((port) => {
@@ -156,7 +165,7 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onMessage.addListener(async (msg) => {
     if (msg.type !== "extract") return;
     try {
-      await retrofy(msg, port, controller.signal);
+      await retrofy(msg, port, controller);
     } catch (err) {
       if (!controller.signal.aborted) {
         try {
@@ -167,7 +176,20 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-async function retrofy(msg, port, signal) {
+async function retrofy(msg, port, controller) {
+  // A speculative generation started at link-click time? Hand the port over
+  // to it instead of starting a second (billed) request.
+  const tabId = port.sender?.tab?.id;
+  const pending = tabId != null ? pendingGenerations.get(tabId) : null;
+  if (pending) {
+    pendingGenerations.delete(tabId);
+    if (pending.url === msg.url && pending.started) {
+      attachToPending(pending, port, controller);
+      return;
+    }
+    pending.abort(); // different page, or prefetch hasn't paid off yet
+  }
+
   const { apiKey, model } = await getSettings();
   if (!apiKey) {
     port.postMessage({
@@ -186,6 +208,21 @@ async function retrofy(msg, port, signal) {
     return;
   }
 
+  const result = await runGeneration({
+    apiKey,
+    model,
+    url: msg.url,
+    content: msg.content,
+    signal: controller.signal,
+    cacheKey,
+    onDelta: (text) => port.postMessage({ type: "delta", text }),
+  });
+  port.postMessage({ type: "done", complete: result.complete, fromCache: false });
+}
+
+// Core streaming call, shared by the normal (port-driven) flow and the
+// speculative (click-time) flow. Writes the cache itself on clean completion.
+async function runGeneration({ apiKey, model, url, content, signal, cacheKey, onDelta }) {
   const body = {
     model,
     max_tokens: MAX_TOKENS,
@@ -194,7 +231,7 @@ async function retrofy(msg, port, signal) {
     messages: [
       {
         role: "user",
-        content: `Rebuild this page as a retro website.\n\nURL: ${msg.url}\n\n${msg.content}`,
+        content: `Rebuild this page as a retro website.\n\nURL: ${url}\n\n${content}`,
       },
     ],
   };
@@ -233,7 +270,7 @@ async function retrofy(msg, port, signal) {
     for await (const event of sseEvents(response.body)) {
       if (event.type === "content_block_delta" && event.delta?.type === "text_delta") {
         fullText += event.delta.text;
-        port.postMessage({ type: "delta", text: event.delta.text });
+        onDelta(event.delta.text);
       } else if (event.type === "message_delta" && event.delta?.stop_reason) {
         stopReason = event.delta.stop_reason;
       } else if (event.type === "message_stop") {
@@ -256,7 +293,168 @@ async function retrofy(msg, port, signal) {
       // a cache-write failure as a generation error.
     }
   }
-  port.postMessage({ type: "done", complete, fromCache: false });
+  return { complete };
+}
+
+// ------------------------------------------------- speculative generation
+
+// tabId -> pending entry. In-memory is fine: the keepalive interval keeps
+// the worker alive while a speculative stream runs.
+const pendingGenerations = new Map();
+
+function abortPending(tabId) {
+  const pending = pendingGenerations.get(tabId);
+  if (pending) {
+    pendingGenerations.delete(tabId);
+    pending.abort();
+  }
+}
+
+async function startSpeculative(tabId, url) {
+  try {
+    const { apiKey, model } = await getSettings();
+    if (!apiKey) return;
+    const cacheKey = `cache::${model}::${url}`;
+    if ((await chrome.storage.local.get(cacheKey))[cacheKey]) return; // cache serves instantly
+
+    abortPending(tabId); // at most one speculative run per tab
+    const controller = new AbortController();
+    const entry = {
+      url,
+      started: false,
+      attached: false,
+      buffered: [],
+      settled: null,
+      onDelta: null,
+      onSettle: null,
+      abort: () => controller.abort(),
+    };
+    pendingGenerations.set(tabId, entry);
+    // If the content script never claims it (navigation failed, tab gone),
+    // stop paying for tokens.
+    setTimeout(() => {
+      if (pendingGenerations.get(tabId) === entry) {
+        pendingGenerations.delete(tabId);
+        controller.abort();
+      }
+    }, 90000);
+
+    const content = await prefetchExtract(url, controller.signal);
+    if (!content) {
+      // Bot-walled, non-HTML, or too thin — fall back to the normal
+      // extract-after-load flow by simply withdrawing the entry.
+      if (pendingGenerations.get(tabId) === entry) pendingGenerations.delete(tabId);
+      return;
+    }
+    entry.started = true;
+
+    const settle = (message) => {
+      if (entry.onSettle) entry.onSettle(message);
+      else entry.settled = message;
+    };
+    try {
+      const result = await runGeneration({
+        apiKey,
+        model,
+        url,
+        content,
+        signal: controller.signal,
+        cacheKey,
+        onDelta: (text) => {
+          if (entry.onDelta) entry.onDelta(text);
+          else entry.buffered.push(text);
+        },
+      });
+      settle({ type: "done", complete: result.complete, fromCache: false });
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      if (entry.attached) {
+        settle({ type: "error", message: err.message });
+      } else if (pendingGenerations.get(tabId) === entry) {
+        // Unclaimed failure: withdraw silently, normal flow takes over.
+        pendingGenerations.delete(tabId);
+      } else {
+        entry.settled = { type: "error", message: err.message };
+      }
+    }
+  } catch (_) {
+    // Speculative generation is best-effort; the normal flow still works.
+  }
+}
+
+function attachToPending(pending, port, controller) {
+  pending.attached = true;
+  if (pending.buffered.length) {
+    try {
+      port.postMessage({ type: "delta", text: pending.buffered.join("") });
+    } catch (_) {}
+    pending.buffered = [];
+  }
+  if (pending.settled) {
+    try {
+      port.postMessage(pending.settled);
+    } catch (_) {}
+    return;
+  }
+  pending.onDelta = (text) => {
+    try {
+      port.postMessage({ type: "delta", text });
+    } catch (_) {}
+  };
+  pending.onSettle = (message) => {
+    try {
+      port.postMessage(message);
+    } catch (_) {}
+  };
+  // Ejecting the overlay aborts the speculative stream too.
+  controller.signal.addEventListener("abort", pending.abort);
+}
+
+// Fetch the destination page and extract its content in the offscreen
+// document (service workers have no DOMParser). Returns null on any
+// failure — speculative generation must degrade, never break, the flow.
+async function prefetchExtract(url, signal) {
+  let resp;
+  try {
+    const timeout = AbortSignal.timeout(12000);
+    const merged = AbortSignal.any ? AbortSignal.any([signal, timeout]) : signal;
+    // credentials:include = the prefetch sees the same page a navigation
+    // would (logged-in content), for http(s) GET only.
+    resp = await fetch(url, { credentials: "include", signal: merged });
+  } catch (_) {
+    return null;
+  }
+  if (!resp.ok) return null;
+  if (!(resp.headers.get("content-type") || "").includes("html")) return null;
+  const html = (await resp.text()).slice(0, 800_000);
+  await ensureOffscreen();
+  const reply = await chrome.runtime.sendMessage({
+    target: "retro-offscreen",
+    type: "extract-html",
+    html,
+    url,
+  });
+  if (!reply?.ok || (reply.content || "").length < 400) return null;
+  return reply.content;
+}
+
+let offscreenReady = null;
+function ensureOffscreen() {
+  if (!offscreenReady) {
+    offscreenReady = (async () => {
+      if (await chrome.offscreen.hasDocument()) return;
+      await chrome.offscreen.createDocument({
+        url: "src/offscreen.html",
+        reasons: ["DOM_PARSER"],
+        justification:
+          "Parse prefetched HTML to extract page content for retro generation",
+      });
+    })().catch((err) => {
+      offscreenReady = null;
+      throw err;
+    });
+  }
+  return offscreenReady;
 }
 
 // Parse a Server-Sent Events stream into JSON event objects.

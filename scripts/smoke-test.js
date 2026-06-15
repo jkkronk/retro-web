@@ -79,11 +79,12 @@ global.chrome = {
   },
 };
 
-const code = require("fs").readFileSync(
-  require("path").join(__dirname, "..", "src", "content.js"),
-  "utf8",
-);
-eval(code);
+// Load in the same order the extension injects them.
+const path = require("path");
+const fs = require("fs");
+for (const file of ["extract.js", "content.js"]) {
+  eval(fs.readFileSync(path.join(__dirname, "..", "src", file), "utf8"));
+}
 
 if (typeof portMessageHandler !== "function" || typeof portDisconnectHandler !== "function") {
   console.error("FAIL: content script did not register port listeners");

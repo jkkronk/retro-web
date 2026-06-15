@@ -73,7 +73,9 @@
 
     let content;
     try {
-      content = extractContent();
+      // Defined in src/extract.js, injected alongside this file; shared with
+      // the offscreen prefetch parser.
+      content = window.extractFromDocument(document);
     } catch (err) {
       ui.showError("Extraction failed: " + err.message);
       return;
@@ -130,67 +132,8 @@
     port.postMessage({ type: "extract", url: location.href, content });
   }
 
-  // ---------------------------------------------------------------- extract
-
-  // Performance matters here: this runs on arbitrary (possibly huge) pages.
-  // textContent only (innerText forces a reflow per call), a running length
-  // counter (never re-join inside the loop), and hard per-category caps so
-  // link-farm pages (search results, news fronts) can't blow up the prompt.
-  const MAX_CHARS = 9000;
-  const CAPS = { heading: 25, text: 50, image: 10, link: 25 };
-
-  function extractContent() {
-    const parts = [];
-    let totalLen = 0;
-    const counts = { heading: 0, text: 0, image: 0, link: 0 };
-    const seen = new Set();
-
-    const push = (kind, entry) => {
-      if (counts[kind] >= CAPS[kind] || seen.has(entry)) return;
-      seen.add(entry);
-      counts[kind]++;
-      parts.push(entry);
-      totalLen += entry.length + 1;
-    };
-
-    parts.push(`TITLE: ${document.title}`);
-    const desc = document.querySelector('meta[name="description"]')?.content;
-    if (desc) parts.push(`DESCRIPTION: ${desc}`);
-    totalLen = parts.join("\n").length;
-
-    const root =
-      document.querySelector("main, article, [role='main']") || document.body;
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
-
-    for (let node = walker.currentNode; node; node = walker.nextNode()) {
-      if (totalLen > MAX_CHARS) break;
-      const tag = node.tagName;
-      if (tag === "SCRIPT" || tag === "STYLE" || tag === "NOSCRIPT") continue;
-      if (/^H[1-4]$/.test(tag)) {
-        const text = clean(node.textContent);
-        if (text && text.length < 200) push("heading", `${tag}: ${text}`);
-      } else if (tag === "P" || tag === "BLOCKQUOTE") {
-        const text = clean(node.textContent);
-        if (text && text.length > 20) push("text", text.slice(0, 500));
-      } else if (tag === "IMG") {
-        const src = node.currentSrc || node.src;
-        if (src && src.startsWith("http") && node.width > 80 && node.height > 80) {
-          push("image", `IMAGE: ${src} (alt: ${node.alt || "none"})`);
-        }
-      } else if (tag === "A") {
-        const text = clean(node.textContent);
-        const href = node.href;
-        if (text && text.length > 2 && text.length < 80 && href?.startsWith("http")) {
-          push("link", `LINK: "${text}" -> ${href}`);
-        }
-      }
-    }
-    return parts.join("\n");
-  }
-
-  function clean(text) {
-    return (text || "").replace(/\s+/g, " ").trim();
-  }
+  // Extraction lives in src/extract.js (window.extractFromDocument), shared
+  // with the offscreen document that parses prefetched HTML.
 
   // ---------------------------------------------------------------- overlay
 
@@ -468,8 +411,11 @@
     bar.append(text, blink);
     overlay.appendChild(bar);
 
+    const startedAt = Date.now();
     const update = (bytes) => {
-      text.textContent = `Transferring data from geocities.com ... ${(bytes / 1024).toFixed(1)} KB received (28.8 kbps)`;
+      const kb = bytes / 1024;
+      const secs = Math.max(1, (Date.now() - startedAt) / 1000);
+      text.textContent = `Transferring data from geocities.com ... ${kb.toFixed(1)} KB in ${secs.toFixed(0)}s (${(kb / secs).toFixed(1)} KB/s — just like 1998)`;
     };
     update(0);
 

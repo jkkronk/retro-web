@@ -14,7 +14,7 @@ document.getElementById("retrofy").addEventListener("click", async () => {
   try {
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      files: ["src/content.js"],
+      files: ["src/extract.js", "src/content.js"],
     });
     window.close();
   } catch (err) {
