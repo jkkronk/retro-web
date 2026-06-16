@@ -12,6 +12,21 @@
   // A real cached page (not the LRU bookkeeping index).
   const isCacheKey = (k) => k.startsWith("cache::") && k !== CACHE_INDEX_KEY;
 
+  // Pages the extension can't inject into and must never retro-fy: browser-
+  // internal schemes plus the Chrome Web Store (script injection is blocked
+  // there). The single source of truth for "drop out of retro mode" decisions.
+  const isRestrictedUrl = (url) =>
+    !url ||
+    /^(chrome|edge|about|chrome-extension|devtools|view-source):/.test(url) ||
+    /^https:\/\/chromewebstore\.google\.com\//.test(url) ||
+    /^https:\/\/chrome\.google\.com\/webstore/.test(url);
+
   const g = typeof self !== "undefined" ? self : globalThis;
-  g.RetroConst = { DEFAULT_MODEL, CACHE_INDEX_KEY, buildCacheKey, isCacheKey };
+  g.RetroConst = {
+    DEFAULT_MODEL,
+    CACHE_INDEX_KEY,
+    buildCacheKey,
+    isCacheKey,
+    isRestrictedUrl,
+  };
 })();
