@@ -7,7 +7,7 @@ document.getElementById("retrofy").addEventListener("click", async () => {
     return;
   }
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id || /^(chrome|edge|about|chrome-extension):/.test(tab.url || "")) {
+  if (!tab?.id || self.RetroConst.isRestrictedUrl(tab.url)) {
     status.textContent = "Can't retro-fy this page.";
     return;
   }

@@ -208,14 +208,24 @@
       )}" target="_self"></head><body>`,
     );
     // Attach AFTER doc.open() — open() clears listeners on the document.
-    doc.addEventListener("click", (e) => {
+    // The iframe is sandboxed without allow-popups/allow-top-navigation, so
+    // links can't navigate on their own — we route every activation through the
+    // background. Modifier / middle clicks open a new (still retro) tab; plain
+    // clicks navigate this tab. auxclick covers middle-click (it doesn't fire
+    // "click"); right-click (button 2) is left alone for the context menu.
+    const onLinkActivate = (e) => {
+      if (e.button === 2) return;
       const a = e.target.closest?.("a[href]");
-      if (!a) return;
+      if (!a || !/^https?:/i.test(a.href)) return;
       e.preventDefault();
-      if (/^https?:/i.test(a.href)) {
-        chrome.runtime.sendMessage({ type: "retro-nav", url: a.href });
-      }
-    });
+      const newTab = e.button === 1 || e.metaKey || e.ctrlKey || e.shiftKey;
+      chrome.runtime.sendMessage({
+        type: newTab ? "retro-nav-newtab" : "retro-nav",
+        url: a.href,
+      });
+    };
+    doc.addEventListener("click", onLinkActivate);
+    doc.addEventListener("auxclick", onLinkActivate);
 
     let revealed = false;
     let statusBar = null;

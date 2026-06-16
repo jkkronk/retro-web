@@ -9,7 +9,8 @@
 // pragmatic choice for a service worker.
 
 importScripts("constants.js");
-const { DEFAULT_MODEL, CACHE_INDEX_KEY, buildCacheKey } = self.RetroConst;
+const { DEFAULT_MODEL, CACHE_INDEX_KEY, buildCacheKey, isRestrictedUrl } =
+  self.RetroConst;
 
 const API_URL = "https://api.anthropic.com/v1/messages";
 // Output length is the dominant latency cost — a tight cap plus the
@@ -61,6 +62,17 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     );
     // We know the destination NOW — start generating while it loads.
     startSpeculative(tabId, msg.url);
+  } else if (msg.type === "retro-nav-newtab") {
+    // Modifier / middle clicks open the link in a NEW tab. The retro page lives
+    // in a sandboxed iframe with no allow-popups, so it can't open the tab
+    // itself — the background does it, carrying retro mode into the new tab.
+    chrome.tabs
+      .create({ url: msg.url, openerTabId: tabId, active: false })
+      .then((tab) => {
+        if (tab?.id == null) return;
+        setRetroMode(tab.id, true);
+        startSpeculative(tab.id, msg.url);
+      });
   } else if (msg.type === "retro-exit") {
     setRetroMode(tabId, false);
     abortPending(tabId);
@@ -70,6 +82,17 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   setRetroMode(tabId, false);
   abortPending(tabId);
+});
+
+// New tabs inherit retro mode from the tab that opened them, so links opened in
+// a new tab (context-menu "Open in new tab", target=_blank, window.open) keep
+// surfing in 1998. Fires before the new tab's navigation commits, so the
+// onCommitted cover-paint + re-injection pipeline below then applies to it.
+chrome.tabs.onCreated.addListener(async (tab) => {
+  if (tab.id == null || tab.openerTabId == null) return;
+  if (await isRetroMode(tab.openerTabId)) {
+    await setRetroMode(tab.id, true);
+  }
 });
 
 // Runs in the page at document_start, before first paint: hides the modern
@@ -143,16 +166,21 @@ chrome.webNavigation.onDOMContentLoaded.addListener(async ({ tabId, frameId }) =
 });
 
 // Fallback for loads where DOMContentLoaded was missed (e.g. injected mid-
-// load) and the place restricted pages drop out of retro mode.
-chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
+// load), and the place restricted pages drop out of retro mode.
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (changeInfo.status !== "complete") return;
   if (!(await isRetroMode(tabId))) return;
   try {
     await ensureRetroInjected(tabId);
   } catch (_) {
-    // Restricted page (chrome://, web store, etc.) — drop out of retro mode
-    // so we don't keep failing on every load in this tab.
-    await setRetroMode(tabId, false);
+    // Only drop retro mode on genuinely restricted pages (chrome://, web
+    // store, etc.). Transient injection failures during fast navigation also
+    // throw here — clearing the flag for those would silently strand the tab
+    // in modern mode for every later link and typed URL, so leave it set and
+    // let the next load retry.
+    if (isRestrictedUrl(tab?.url)) {
+      await setRetroMode(tabId, false);
+    }
   }
 });
 
