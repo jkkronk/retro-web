@@ -16,6 +16,12 @@ const API_URL = "https://api.anthropic.com/v1/messages";
 // Output length is the dominant latency cost — a tight cap plus the
 // "curate, don't transcribe" prompt rule keeps generation fast.
 const MAX_TOKENS = 6144;
+// After the user ejects ("Back to 2026") mid-build we keep generating so a
+// re-entry ("Back to 1996") can resume — but if they never come back, this
+// bounds the wasted token spend. Sized well above a normal generation (capped
+// at MAX_TOKENS, ~tens of seconds) so the common case is "finish and cache",
+// not "abort"; it's a backstop for a stuck stream.
+const RESUME_TIMEOUT_MS = 120000;
 
 const SYSTEM_PROMPT = `You are "WebMaster Dave", a passionate amateur webmaster in the year 1998 running a hand-crafted homepage on Geocities. You rebuild modern web pages as authentic late-90s/early-2000s websites.
 
@@ -74,8 +80,11 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
         startSpeculative(tab.id, msg.url);
       });
   } else if (msg.type === "retro-exit") {
+    // Only turn off link-nav auto-retro. Do NOT abort an in-flight generation:
+    // ejecting ("Back to 2026") fires this on every teardown, and we want the
+    // build to keep going so "Back to 1996" can resume it. The port's
+    // onDisconnect detaches + bounds it with a timeout instead.
     setRetroMode(tabId, false);
-    abortPending(tabId);
   }
 });
 
@@ -188,10 +197,22 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "retrofy") return;
-  // Abort the in-flight API request the moment the user ejects — stops
-  // token billing instead of streaming to a dead port.
   const controller = new AbortController();
-  port.onDisconnect.addListener(() => controller.abort());
+  port.onDisconnect.addListener(() => {
+    // Eject ("Back to 2026") or any overlay teardown disconnects the port. If a
+    // generation for this tab is still building, DON'T abort — detach and keep
+    // it streaming into the entry's buffer so a re-entry can resume (or it
+    // finishes and caches). detachEntry arms a timeout to bound token cost if
+    // the user never returns. Cache-served / already-done / no-entry flows have
+    // nothing running, so just abort the now-dead controller (a no-op there).
+    const tabId = port.sender?.tab?.id;
+    const entry = tabId != null ? pendingGenerations.get(tabId) : null;
+    if (entry && entry.started && !entry.done) {
+      detachEntry(tabId, entry);
+    } else {
+      controller.abort();
+    }
+  });
   port.onMessage.addListener(async (msg) => {
     if (msg.type !== "extract") return;
     try {
@@ -207,17 +228,20 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 async function retrofy(msg, port, controller) {
-  // A speculative generation started at link-click time? Hand the port over
-  // to it instead of starting a second (billed) request.
+  // An existing generation for this tab — a speculative run started at link-
+  // click time, OR a build the user ejected and is now resuming. Hand the port
+  // over to it instead of starting a second (billed) request. Keep it in the
+  // map on a successful attach so a *second* eject can detach it again.
   const tabId = port.sender?.tab?.id;
   const pending = tabId != null ? pendingGenerations.get(tabId) : null;
   if (pending) {
-    pendingGenerations.delete(tabId);
     if (pending.url === msg.url && pending.started) {
       attachToPending(pending, port, controller);
       return;
     }
-    pending.abort(); // different page, or prefetch hasn't paid off yet
+    // Different page, or a prefetch that never started — supersede it.
+    pendingGenerations.delete(tabId);
+    pending.abort();
   }
 
   const { apiKey, model } = await getSettings();
@@ -239,16 +263,21 @@ async function retrofy(msg, port, controller) {
     return;
   }
 
-  const result = await runGeneration({
+  // Run into a pending entry (like the speculative flow) so an eject can detach
+  // and a re-entry can re-attach. Attach the live port immediately; streamInto
+  // runs in the background and delivers via the entry's callbacks.
+  const entry = makeEntry(tabId, msg.url, controller);
+  entry.started = true;
+  pendingGenerations.set(tabId, entry);
+  attachToPending(entry, port, controller);
+  streamInto(entry, tabId, {
     apiKey,
     model,
     url: msg.url,
     content: msg.content,
-    signal: controller.signal,
     cacheKey,
-    onDelta: (text) => port.postMessage({ type: "delta", text }),
+    controller,
   });
-  port.postMessage({ type: "done", complete: result.complete, fromCache: false });
 }
 
 // Core streaming call, shared by the normal (port-driven) flow and the
@@ -397,8 +426,101 @@ function abortPending(tabId) {
   const pending = pendingGenerations.get(tabId);
   if (pending) {
     pendingGenerations.delete(tabId);
+    clearTimeout(pending.detachTimer);
+    clearTimeout(pending.guardTimer);
     pending.abort();
   }
+}
+
+// A pending entry holds an in-flight (or just-finished) generation that no port,
+// one port, or successive ports can attach to. `full` accumulates EVERY chunk
+// from token 0 — on each (re-)attach the new overlay's iframe is empty, so we
+// replay the whole thing, then stream live deltas. `guardTimer` bounds an entry
+// that's never claimed (speculative nav that didn't land); `detachTimer` bounds
+// one left running after an eject.
+function makeEntry(tabId, url, controller) {
+  return {
+    url,
+    started: false,
+    attached: false,
+    done: false,
+    full: "",
+    settled: null,
+    onDelta: null,
+    onSettle: null,
+    detachTimer: null,
+    guardTimer: null,
+    abort: () => controller.abort(),
+  };
+}
+
+// Generation ended (cleanly, truncated, or errored). Rule: generation end ⇒
+// entry leaves the map. Clean finishes are already cached by runGeneration, so a
+// later return hits the cache; an attached port gets the settle message now, an
+// unattached one (finished while detached, or a speculative failure) just lets
+// the next flow take over.
+function finalizeEntry(tabId, entry, message) {
+  entry.done = true;
+  clearTimeout(entry.detachTimer);
+  clearTimeout(entry.guardTimer);
+  if (pendingGenerations.get(tabId) === entry) pendingGenerations.delete(tabId);
+  if (entry.onSettle) entry.onSettle(message);
+  else entry.settled = message;
+}
+
+// Run a generation into an entry, accumulating all output in entry.full and
+// forwarding live deltas only while a port is attached. Shared by the normal
+// (port-driven) flow and the speculative (click-time) flow. Fire-and-forget:
+// callers don't await it; delivery happens through the entry's callbacks.
+function streamInto(entry, tabId, { apiKey, model, url, content, cacheKey, controller }) {
+  runGeneration({
+    apiKey,
+    model,
+    url,
+    content,
+    signal: controller.signal,
+    cacheKey,
+    onDelta: (text) => {
+      entry.full += text;
+      if (entry.attached && entry.onDelta) entry.onDelta(text);
+    },
+  })
+    .then((result) =>
+      finalizeEntry(tabId, entry, {
+        type: "done",
+        complete: result.complete,
+        fromCache: false,
+      }),
+    )
+    .catch((err) => {
+      if (controller.signal.aborted) {
+        // Aborted by detach-timeout, tab close, or supersede — drop silently.
+        entry.done = true;
+        clearTimeout(entry.detachTimer);
+        clearTimeout(entry.guardTimer);
+        if (pendingGenerations.get(tabId) === entry) {
+          pendingGenerations.delete(tabId);
+        }
+        return;
+      }
+      finalizeEntry(tabId, entry, { type: "error", message: err.message });
+    });
+}
+
+// Port lost (eject / overlay teardown) while the generation is still building:
+// stop forwarding (output keeps accumulating into entry.full) and arm a timeout
+// that aborts + withdraws the entry if no re-entry reclaims it in time.
+function detachEntry(tabId, entry) {
+  entry.attached = false;
+  entry.onDelta = null;
+  entry.onSettle = null;
+  clearTimeout(entry.detachTimer);
+  entry.detachTimer = setTimeout(() => {
+    if (pendingGenerations.get(tabId) === entry) {
+      pendingGenerations.delete(tabId);
+      entry.abort();
+    }
+  }, RESUME_TIMEOUT_MS);
 }
 
 async function startSpeculative(tabId, url) {
@@ -413,20 +535,11 @@ async function startSpeculative(tabId, url) {
 
     abortPending(tabId); // at most one speculative run per tab
     const controller = new AbortController();
-    const entry = {
-      url,
-      started: false,
-      attached: false,
-      buffered: [],
-      settled: null,
-      onDelta: null,
-      onSettle: null,
-      abort: () => controller.abort(),
-    };
+    const entry = makeEntry(tabId, url, controller);
     pendingGenerations.set(tabId, entry);
     // If the content script never claims it (navigation failed, tab gone),
-    // stop paying for tokens.
-    setTimeout(() => {
+    // stop paying for tokens. Cleared by attachToPending once claimed.
+    entry.guardTimer = setTimeout(() => {
       if (pendingGenerations.get(tabId) === entry) {
         pendingGenerations.delete(tabId);
         controller.abort();
@@ -437,52 +550,32 @@ async function startSpeculative(tabId, url) {
     if (!content) {
       // Bot-walled, non-HTML, or too thin — fall back to the normal
       // extract-after-load flow by simply withdrawing the entry.
-      if (pendingGenerations.get(tabId) === entry) pendingGenerations.delete(tabId);
+      if (pendingGenerations.get(tabId) === entry) {
+        pendingGenerations.delete(tabId);
+        clearTimeout(entry.guardTimer);
+      }
       return;
     }
     entry.started = true;
-
-    const settle = (message) => {
-      if (entry.onSettle) entry.onSettle(message);
-      else entry.settled = message;
-    };
-    try {
-      const result = await runGeneration({
-        apiKey,
-        model,
-        url,
-        content,
-        signal: controller.signal,
-        cacheKey,
-        onDelta: (text) => {
-          if (entry.onDelta) entry.onDelta(text);
-          else entry.buffered.push(text);
-        },
-      });
-      settle({ type: "done", complete: result.complete, fromCache: false });
-    } catch (err) {
-      if (controller.signal.aborted) return;
-      if (entry.attached) {
-        settle({ type: "error", message: err.message });
-      } else if (pendingGenerations.get(tabId) === entry) {
-        // Unclaimed failure: withdraw silently, normal flow takes over.
-        pendingGenerations.delete(tabId);
-      } else {
-        entry.settled = { type: "error", message: err.message };
-      }
-    }
+    streamInto(entry, tabId, { apiKey, model, url, content, cacheKey, controller });
   } catch (_) {
     // Speculative generation is best-effort; the normal flow still works.
   }
 }
 
 function attachToPending(pending, port, controller) {
+  // Claimed by a (new) overlay — cancel both bounding timers.
+  clearTimeout(pending.guardTimer);
+  clearTimeout(pending.detachTimer);
+  pending.guardTimer = null;
+  pending.detachTimer = null;
   pending.attached = true;
-  if (pending.buffered.length) {
+  // The new overlay's iframe is empty — replay everything generated so far.
+  // Keep pending.full intact so a later re-eject can replay again.
+  if (pending.full) {
     try {
-      port.postMessage({ type: "delta", text: pending.buffered.join("") });
+      port.postMessage({ type: "delta", text: pending.full });
     } catch (_) {}
-    pending.buffered = [];
   }
   if (pending.settled) {
     try {
@@ -500,7 +593,8 @@ function attachToPending(pending, port, controller) {
       port.postMessage(message);
     } catch (_) {}
   };
-  // Ejecting the overlay aborts the speculative stream too.
+  // A hard abort of THIS port's controller (tab close, supersede) aborts the
+  // underlying stream too. A plain eject detaches instead (see onDisconnect).
   controller.signal.addEventListener("abort", pending.abort);
 }
 
